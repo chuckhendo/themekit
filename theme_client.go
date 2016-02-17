@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -14,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Shopify/themekit/bucket"
+	"github.com/Shopify/themekit/theme"
 )
 
 const CreateThemeMaxRetries int = 3
@@ -22,14 +24,6 @@ type ThemeClient struct {
 	config Configuration
 	client *http.Client
 	filter EventFilter
-}
-
-type Theme struct {
-	Name        string `json:"name"`
-	Source      string `json:"src,omitempty"`
-	Role        string `json:"role,omitempty"`
-	Id          int64  `json:"id,omitempty"`
-	Previewable bool   `json:"previewable,omitempty"`
 }
 
 type apiResponse struct {
@@ -67,14 +61,14 @@ const (
 )
 
 type AssetEvent interface {
-	Asset() Asset
+	Asset() theme.Asset
 	Type() EventType
 }
 
 func NewThemeClient(config Configuration) ThemeClient {
 	return ThemeClient{
 		config: config,
-		client: newHttpClient(config),
+		client: newHTTPClient(config),
 		filter: NewEventFilterFromPatternsAndFiles(config.IgnoredFiles, config.Ignores),
 	}
 }
@@ -83,14 +77,16 @@ func (t ThemeClient) GetConfiguration() Configuration {
 	return t.config
 }
 
-func (t ThemeClient) LeakyBucket() *LeakyBucket {
-	return NewLeakyBucket(t.config.BucketSize, t.config.RefillRate, 1)
+func (t ThemeClient) LeakyBucket() *bucket.LeakyBucket {
+	return bucket.NewLeakyBucket(t.config.BucketSize, t.config.RefillRate, 1)
 }
 
-func (t ThemeClient) AssetList() (results chan Asset, errs chan error) {
-	results = make(chan Asset)
+func (t ThemeClient) AssetList() (results chan theme.Asset, errs chan error) {
+	results = make(chan theme.Asset)
 	errs = make(chan error)
 	go func() {
+		defer close(results)
+		defer close(errs)
 		queryBuilder := func(path string) string {
 			return path
 		}
@@ -100,28 +96,35 @@ func (t ThemeClient) AssetList() (results chan Asset, errs chan error) {
 			errs <- resp.err
 		}
 
-		var assets map[string][]Asset
+		if resp.code >= 400 && resp.code < 500 {
+			errs <- fmt.Errorf("Server responded with HTTP %d; please check your credentials.", resp.code)
+			return
+		}
+		if resp.code >= 500 {
+			errs <- fmt.Errorf("Server responded with HTTP %d; try again in a few minutes.", resp.code)
+			return
+		}
+
+		var assets map[string][]theme.Asset
 		err := json.Unmarshal(resp.body, &assets)
 		if err != nil {
 			errs <- err
 			return
 		}
 
-		sort.Sort(ByAsset(assets["assets"]))
+		sort.Sort(theme.ByAsset(assets["assets"]))
 		sanitizedAssets := ignoreCompiledAssets(assets["assets"])
 
 		for _, asset := range sanitizedAssets {
 			results <- asset
 		}
-		close(results)
-		close(errs)
 	}()
 	return
 }
 
-func (t ThemeClient) AssetListSync() []Asset {
+func (t ThemeClient) AssetListSync() []theme.Asset {
 	ch, _ := t.AssetList()
-	results := []Asset{}
+	results := []theme.Asset{}
 	for {
 		asset, more := <-ch
 		if !more {
@@ -131,42 +134,35 @@ func (t ThemeClient) AssetListSync() []Asset {
 	}
 }
 
-func (t ThemeClient) LocalAssets(dir string) []Asset {
+func (t ThemeClient) LocalAssets(dir string) []theme.Asset {
 	dir = fmt.Sprintf("%s%s", dir, string(filepath.Separator))
-	glob := fmt.Sprintf("%s**%s*", dir, string(filepath.Separator))
-	files, _ := filepath.Glob(glob)
 
-	assets := []Asset{}
-	for _, file := range files {
-		if !t.filter.MatchesFilter(file) {
-			assetKey := strings.Replace(file, dir, "", -1)
-			asset, err := LoadAsset(dir, assetKey)
-			if err == nil {
-				assets = append(assets, asset)
-			}
-		}
+	assets, err := theme.LoadAssetsFromDirectory(dir, t.filter.MatchesFilter)
+	if err != nil {
+		panic(err)
 	}
+
 	return assets
 }
 
-type AssetRetrieval func(filename string) (Asset, error)
+type AssetRetrieval func(filename string) (theme.Asset, error)
 
-func (t ThemeClient) Asset(filename string) (Asset, error) {
+func (t ThemeClient) Asset(filename string) (theme.Asset, error) {
 	queryBuilder := func(path string) string {
 		return fmt.Sprintf("%s&asset[key]=%s", path, filename)
 	}
 
 	resp := t.query(queryBuilder)
 	if resp.err != nil {
-		return Asset{}, resp.err
+		return theme.Asset{}, resp.err
 	}
 	if resp.code >= 400 {
-		return Asset{}, NonFatalNetworkError{Code: resp.code, Verb: "GET", Message: "not found"}
+		return theme.Asset{}, NonFatalNetworkError{Code: resp.code, Verb: "GET", Message: "not found"}
 	}
-	var asset map[string]Asset
+	var asset map[string]theme.Asset
 	err := json.Unmarshal(resp.body, &asset)
 	if err != nil {
-		return Asset{}, err
+		return theme.Asset{}, err
 	}
 
 	return asset["asset"], nil
@@ -176,8 +172,8 @@ func (t ThemeClient) CreateTheme(name, zipLocation string) (ThemeClient, chan Th
 	var wg sync.WaitGroup
 	wg.Add(1)
 	path := fmt.Sprintf("%s/themes.json", t.config.AdminUrl())
-	contents := map[string]Theme{
-		"theme": Theme{Name: name, Source: zipLocation, Role: "unpublished"},
+	contents := map[string]theme.Theme{
+		"theme": theme.Theme{Name: name, Source: zipLocation, Role: "unpublished"},
 	}
 
 	log := make(chan ThemeEvent)
@@ -198,7 +194,7 @@ func (t ThemeClient) CreateTheme(name, zipLocation string) (ThemeClient, chan Th
 			go logEvent(themeEvent)
 		}
 		if retries >= CreateThemeMaxRetries {
-			err := errors.New(fmt.Sprintf("'%s' cannot be retrieved from Github.", zipLocation))
+			err := fmt.Errorf(fmt.Sprintf("'%s' cannot be retrieved from Github.", zipLocation))
 			NotifyError(err)
 		}
 		return
@@ -212,9 +208,13 @@ func (t ThemeClient) CreateTheme(name, zipLocation string) (ThemeClient, chan Th
 	}()
 
 	wg.Wait()
-	config := t.GetConfiguration()
+	config := t.GetConfiguration() // Shouldn't this configuration already be loaded and initialized?
 	config.ThemeId = themeEvent.ThemeId
-	return NewThemeClient(config.Initialize()), log
+	config, err := config.Initialize()
+	if err != nil {
+		// TODO: there's no way we can signal that something went wrong.
+	}
+	return NewThemeClient(config), log
 }
 
 func (t ThemeClient) Process(events chan AssetEvent) (done chan bool, messages chan ThemeEvent) {
@@ -267,9 +267,8 @@ func (t ThemeClient) query(queryBuilder func(path string) string) apiResponse {
 	resp, err := t.client.Do(req)
 	if err != nil {
 		return apiResponse{err: err}
-	} else {
-		defer resp.Body.Close()
 	}
+	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	return apiResponse{code: resp.StatusCode, body: body, err: err}
 }
@@ -289,7 +288,7 @@ func (t ThemeClient) sendData(method, path string, body []byte) (result APITheme
 
 func (t ThemeClient) request(event AssetEvent, method string) (*http.Response, error) {
 	path := t.config.AssetPath()
-	data := map[string]Asset{"asset": event.Asset()}
+	data := map[string]theme.Asset{"asset": event.Asset()}
 
 	encoded, err := json.Marshal(data)
 	if err != nil {
@@ -310,8 +309,8 @@ func processResponse(r *http.Response, err error, event AssetEvent) ThemeEvent {
 	return NewAPIAssetEvent(r, event, err)
 }
 
-func (t ThemeClient) isDoneProcessing(themeId int64) bool {
-	path := fmt.Sprintf("%s/themes/%d.json", t.config.AdminUrl(), themeId)
+func (t ThemeClient) isDoneProcessing(themeID int64) bool {
+	path := fmt.Sprintf("%s/themes/%d.json", t.config.AdminUrl(), themeID)
 	themeEvent := t.sendData("GET", path, []byte{})
 	return themeEvent.Previewable
 }
@@ -320,24 +319,24 @@ func ExtractErrorMessage(data []byte, err error) string {
 	return extractAssetAPIErrors(data, err).Error()
 }
 
-func newHttpClient(config Configuration) (client *http.Client) {
+func newHTTPClient(config Configuration) (client *http.Client) {
 	client = &http.Client{}
 	if len(config.Proxy) > 0 {
 		fmt.Println("Proxy URL detected from Configuration:", config.Proxy)
 		fmt.Println("SSL Certificate Validation will be disabled!")
-		proxyUrl, err := url.Parse(config.Proxy)
+		proxyURL, err := url.Parse(config.Proxy)
 		if err != nil {
 			fmt.Println("Proxy configuration invalid:", err)
 		}
-		client.Transport = &http.Transport{Proxy: http.ProxyURL(proxyUrl), TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+		client.Transport = &http.Transport{Proxy: http.ProxyURL(proxyURL), TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
 	return
 }
 
-func ignoreCompiledAssets(assets []Asset) []Asset {
+func ignoreCompiledAssets(assets []theme.Asset) []theme.Asset {
 	newSize := 0
-	results := make([]Asset, len(assets))
-	isCompiled := func(a Asset, rest []Asset) bool {
+	results := make([]theme.Asset, len(assets))
+	isCompiled := func(a theme.Asset, rest []theme.Asset) bool {
 		for _, other := range rest {
 			if strings.Contains(other.Key, a.Key) {
 				return true

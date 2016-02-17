@@ -3,9 +3,11 @@ package commands
 import (
 	"bytes"
 	"errors"
-	"github.com/Shopify/themekit"
 	"net/http"
 	"os"
+
+	"github.com/Shopify/themekit"
+	"github.com/Shopify/themekit/atom"
 )
 
 const (
@@ -21,7 +23,7 @@ type BootstrapOptions struct {
 	Directory   string
 	Environment string
 	Prefix      string
-	SetThemeId  bool
+	SetThemeID  bool
 }
 
 func BootstrapCommand(args map[string]interface{}) chan bool {
@@ -31,7 +33,7 @@ func BootstrapCommand(args map[string]interface{}) chan bool {
 	extractString(&options.Directory, "directory", args)
 	extractString(&options.Environment, "environment", args)
 	extractString(&options.Prefix, "prefix", args)
-	extractBool(&options.SetThemeId, "setThemeId", args)
+	extractBool(&options.SetThemeID, "setThemeId", args)
 	extractThemeClient(&options.Client, args)
 	extractEventLog(&options.EventLog, args)
 
@@ -67,7 +69,7 @@ func doBootstrap(options BootstrapOptions) chan bool {
 	}
 	clientForNewTheme, themeEvents := options.Client.CreateTheme(name, zipLocation)
 	mergeEvents(options.getEventLog(), []chan themekit.ThemeEvent{themeEvents})
-	if options.SetThemeId {
+	if options.SetThemeID {
 		AddConfiguration(options.Directory, options.Environment, clientForNewTheme.GetConfiguration())
 	}
 
@@ -104,21 +106,21 @@ func zipPathForVersion(version string) (string, error) {
 	return zipPath(entry.Title), nil
 }
 
-func downloadAtomFeed() (themekit.Feed, error) {
+func downloadAtomFeed() (atom.Feed, error) {
 	resp, err := http.Get(TimberFeedPath)
 	if err != nil {
-		return themekit.Feed{}, err
+		return atom.Feed{}, err
 	}
 	defer resp.Body.Close()
 
-	feed, err := themekit.LoadFeed(resp.Body)
+	feed, err := atom.LoadFeed(resp.Body)
 	if err != nil {
-		return themekit.Feed{}, err
+		return atom.Feed{}, err
 	}
 	return feed, nil
 }
 
-func findReleaseWith(feed themekit.Feed, version string) (themekit.Entry, error) {
+func findReleaseWith(feed atom.Feed, version string) (atom.Entry, error) {
 	if version == LatestRelease {
 		return feed.LatestEntry(), nil
 	}
@@ -127,17 +129,17 @@ func findReleaseWith(feed themekit.Feed, version string) (themekit.Entry, error)
 			return entry, nil
 		}
 	}
-	return themekit.Entry{Title: "Invalid Feed"}, buildInvalidVersionError(feed, version)
+	return atom.Entry{Title: "Invalid Feed"}, buildInvalidVersionError(feed, version)
 }
 
-func buildInvalidVersionError(feed themekit.Feed, version string) error {
+func buildInvalidVersionError(feed atom.Feed, version string) error {
 	buff := bytes.NewBuffer([]byte{})
-	buff.Write([]byte(themekit.RedText("Invalid Timber Version: " + version)))
-	buff.Write([]byte("\nAvailable Versions Are:"))
-	buff.Write([]byte("\n  - master"))
-	buff.Write([]byte("\n  - latest"))
+	buff.WriteString(themekit.RedText("Invalid Timber Version: " + version))
+	buff.WriteString("\nAvailable Versions Are:")
+	buff.WriteString("\n  - master")
+	buff.WriteString("\n  - latest")
 	for _, entry := range feed.Entries {
-		buff.Write([]byte("\n  - " + entry.Title))
+		buff.WriteString("\n  - " + entry.Title)
 	}
 	return errors.New(buff.String())
 }
