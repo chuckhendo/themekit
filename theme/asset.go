@@ -1,9 +1,10 @@
-package themekit
+package theme
 
 import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,11 +18,19 @@ type Asset struct {
 }
 
 func (a Asset) String() string {
-	return fmt.Sprintf("key: %s | value: %s | attachment: %s", a.Key, a.Value, a.Attachment)
+	return fmt.Sprintf("key: %s | value: %d bytes | attachment: %d bytes", a.Key, len([]byte(a.Value)), len([]byte(a.Attachment)))
 }
 
 func (a Asset) IsValid() bool {
 	return len(a.Key) > 0 && (len(a.Value) > 0 || len(a.Attachment) > 0)
+}
+
+func (a Asset) Size() int {
+	if len(a.Value) > 0 {
+		return len(a.Value)
+	} else {
+		return len(a.Attachment)
+	}
 }
 
 // Implementing sort.Interface
@@ -39,28 +48,65 @@ func (assets ByAsset) Less(i, j int) bool {
 	return assets[i].Key < assets[j].Key
 }
 
+func findAllFiles(dir string) ([]string, error) {
+	files := make([]string, 0)
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if info.IsDir() {
+			return nil
+		}
+
+		files = append(files, path)
+		return nil
+	})
+
+	return files, err
+}
+
+func LoadAssetsFromDirectory(dir string, ignore func(path string) bool) ([]Asset, error) {
+	files, err := findAllFiles(dir)
+	if err != nil {
+		panic(err)
+	}
+
+	assets := []Asset{}
+	for _, file := range files {
+		assetKey, err := filepath.Rel(dir, file)
+		if err != nil {
+			panic(err)
+		}
+		if !ignore(assetKey) {
+			asset, err := LoadAsset(dir, assetKey)
+			if err == nil {
+				assets = append(assets, asset)
+			}
+		}
+	}
+
+	return assets, nil
+}
+
 func LoadAsset(root, filename string) (asset Asset, err error) {
 	asset = Asset{}
 	path := toSlash(fmt.Sprintf("%s/%s", root, filename))
 	file, err := os.Open(path)
 	if err != nil {
-		return asset, errors.New(fmt.Sprintf("LoadAsset: %s", err))
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return asset, errors.New(fmt.Sprintf("LoadAsset: %s", err))
+		return asset, fmt.Errorf("LoadAsset: %s", err)
 	}
 	defer file.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return asset, fmt.Errorf("LoadAsset: %s", err)
+	}
 
 	if info.IsDir() {
 		err = errors.New("LoadAsset: File is a directory")
 		return
 	}
 
-	buffer := make([]byte, info.Size())
-	_, err = file.Read(buffer)
+	buffer, err := ioutil.ReadAll(file)
 	if err != nil {
-		return asset, errors.New(fmt.Sprintf("LoadAsset: %s", err))
+		return asset, fmt.Errorf("LoadAsset: %s", err)
 	}
 
 	asset = Asset{Key: toSlash(filename)}

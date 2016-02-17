@@ -3,6 +3,9 @@ package themekit
 import (
 	"bytes"
 	"github.com/stretchr/testify/assert"
+	"net/http"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +43,21 @@ func TestLoadingAnUnsupportedConfiguration(t *testing.T) {
 	assert.Equal(t, "abracadabra", config.AccessToken)
 }
 
+func TestLoadingConfigurationWithMissingFields(t *testing.T) {
+	tests := []struct {
+		src, expectedError string
+	}{
+		{configurationWithoutAccessToken, "missing access_token"},
+		{configurationWithoutDomain, "missing domain"},
+	}
+
+	for _, data := range tests {
+		_, err := LoadConfiguration([]byte(data.src))
+		assert.NotNil(t, err)
+		assert.Equal(t, data.expectedError, err.Error())
+	}
+}
+
 func TestWritingAConfigurationFile(t *testing.T) {
 	buffer := new(bytes.Buffer)
 	config := Configuration{Domain: "hello.myshopify.com", AccessToken: "secret", BucketSize: 10, RefillRate: 4}
@@ -52,6 +70,17 @@ refill_rate: 4
 `
 	assert.Nil(t, err, "An error should not have been raised")
 	assert.Equal(t, expectedConfiguration, string(buffer.Bytes()))
+}
+
+func TestAddHeadersAddsPlatformAndArchitecture(t *testing.T) {
+	req, _ := http.NewRequest("GET", "/foo/bar", nil)
+
+	config := Configuration{Domain: "hello.myshopify.com", AccessToken: "secret", BucketSize: 10, RefillRate: 4}
+	config.AddHeaders(req)
+
+	userAgent := req.Header.Get("User-Agent")
+	assert.True(t, strings.Contains(userAgent, runtime.GOOS))
+	assert.True(t, strings.Contains(userAgent, runtime.GOARCH))
 }
 
 const (
@@ -80,5 +109,14 @@ const (
   store: example.myshopify.com
   access_token: abracadabra
   theme_id: 12345
+  `
+
+	configurationWithoutAccessToken = `
+  store: foo.myshopify.com
+  theme_id: 123
+  `
+
+	configurationWithoutDomain = `
+  access_token: foobar
   `
 )

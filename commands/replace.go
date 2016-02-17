@@ -2,12 +2,14 @@ package commands
 
 import (
 	"github.com/Shopify/themekit"
+	"github.com/Shopify/themekit/bucket"
+	"github.com/Shopify/themekit/theme"
 	"os"
 )
 
 type ReplaceOptions struct {
 	BasicOptions
-	Bucket *themekit.LeakyBucket
+	Bucket *bucket.LeakyBucket
 }
 
 func ReplaceCommand(args map[string]interface{}) chan bool {
@@ -35,7 +37,7 @@ func enqueueEvents(client themekit.ThemeClient, filenames []string, events chan 
 	}
 	go func() {
 		for _, filename := range filenames {
-			asset, err := themekit.LoadAsset(root, filename)
+			asset, err := theme.LoadAsset(root, filename)
 			if err == nil {
 				events <- themekit.NewUploadEvent(asset)
 			}
@@ -44,9 +46,11 @@ func enqueueEvents(client themekit.ThemeClient, filenames []string, events chan 
 	}()
 }
 
-func fullReplace(remoteAssets, localAssets []themekit.Asset, events chan themekit.AssetEvent) {
+// fullReplace takes slices with assets both from the local filesystem and the remote server and translates them
+// into a suitable set of events that updates the remote site to the local state.
+func fullReplace(remoteAssets, localAssets []theme.Asset, events chan themekit.AssetEvent) {
 	assetsActions := map[string]themekit.AssetEvent{}
-	generateActions := func(assets []themekit.Asset, assetEventFn func(asset themekit.Asset) themekit.SimpleAssetEvent) {
+	generateActions := func(assets []theme.Asset, assetEventFn func(asset theme.Asset) themekit.SimpleAssetEvent) {
 		for _, asset := range assets {
 			assetsActions[asset.Key] = assetEventFn(asset)
 		}

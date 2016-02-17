@@ -1,8 +1,9 @@
-package themekit
+package theme
 
 import (
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/suite"
+	"bytes"
+	"image"
+	"image/png"
 	"io/ioutil"
 	"log"
 	"os"
@@ -10,6 +11,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
 type LoadAssetSuite struct {
@@ -105,7 +109,7 @@ func (s *LoadAssetSuite) allocateFileInDir(directory, content string) (root, fil
 	}
 
 	if len(content) > 0 {
-		file.Write([]byte(content))
+		file.WriteString(content)
 		file.Sync()
 		file.Seek(0, 0)
 	}
@@ -157,4 +161,11 @@ func TestSortListOfAssets(t *testing.T) {
 	}
 	sort.Sort(ByAsset(input))
 	assert.Equal(t, expected, input)
+}
+
+func BinaryTestData() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
+	buff := bytes.NewBuffer([]byte{})
+	png.Encode(buff, img)
+	return buff.Bytes()
 }
